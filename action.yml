@@ -1,0 +1,171 @@
+name: Trivy scanner
+description: Scan a container image using `trivy`
+
+inputs:
+  image:
+    required: false
+    type: string
+    default: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  upload_report:
+    required: false
+    type: string
+    default: "true"
+  upload_sarif:
+    required: false
+    type: string
+    default: "true"
+  comment_on_pr:
+    required: false
+    type: string
+    default: "true"
+  github-token:
+    required: false
+    type: string
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: setup
+      shell: bash
+      run: |
+        work_dir="${{ runner.temp }}/trivy-$(uuidgen)"
+        mkdir -p "${work_dir}/cache/" "${work_dir}/reports/"
+        echo "cache_dir=${work_dir}/cache/" >> $GITHUB_OUTPUT
+        echo "report_dir=${work_dir}/reports/" >> $GITHUB_OUTPUT
+
+    - name: Execute Trivy scan
+      shell: bash
+      run: |
+        docker run -i \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ steps.setup.outputs.report_dir }}:/out" \
+            -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            ghcr.io/aquasecurity/trivy \
+            image \
+            --scanners vuln \
+            --severity "CRITICAL,HIGH" \
+            --exit-code 0 \
+            --ignore-unfixed \
+            --format template \
+            --template @contrib/html.tpl \
+            --output /out/trivy.html \
+            "${{ inputs.image }}"
+
+    - name: Generate sarif report
+      shell: bash
+      run: |
+        docker run -i \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ steps.setup.outputs.report_dir }}:/out" \
+            -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            ghcr.io/aquasecurity/trivy \
+            image \
+            --scanners vuln \
+            --severity "CRITICAL,HIGH" \
+            --exit-code 0 \
+            --ignore-unfixed \
+            --format sarif \
+            --output /out/trivy.sarif \
+            "${{ inputs.image }}"
+
+      if: inputs.upload_sarif == 'true'
+
+    - name: Generate json report
+      shell: bash
+      run: |
+        docker run -i \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ steps.setup.outputs.report_dir }}:/out" \
+            -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            ghcr.io/aquasecurity/trivy \
+            image \
+            --scanners vuln \
+            --severity "CRITICAL,HIGH" \
+            --exit-code 0 \
+            --ignore-unfixed \
+            --format json \
+            --output /out/trivy.json \
+            "${{ inputs.image }}"
+
+      if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
+
+    - name: Upload Trivy report
+      uses: actions/upload-artifact@v4
+      with:
+        name: 'Trivy Scan Results'
+        path: "${{ steps.setup.outputs.report_dir }}/trivy.html"
+
+      if: inputs.upload_report == 'true'
+
+    - name: Upload SARIF report
+      uses: github/codeql-action/upload-sarif@v4
+      continue-on-error: true
+      with:
+        sarif_file: "${{ steps.setup.outputs.report_dir }}/trivy.sarif"
+        category: trivy
+
+      if: inputs.upload_sarif == 'true'
+
+    - name: Comment on PR
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('${{ steps.setup.outputs.report_dir }}/trivy.json', 'utf8'));
+
+          const severityIcon = { CRITICAL: '🔴', HIGH: '🟠' };
+
+          let sections = [];
+          for (const result of (data.Results || [])) {
+              const vulns = result.Vulnerabilities || [];
+              if (vulns.length !== 0) {
+                  const rows = vulns.map(v => {
+                      const icon = severityIcon[v.Severity] || v.Severity;
+                      const cve = `[${v.VulnerabilityID}](https://avd.aquasec.com/nvd/${v.VulnerabilityID.toLowerCase()})`;
+                      const title = (v.Title || '').replace(/\|/g, '\\|');
+                      return `| ${icon} ${v.Severity} | ${v.PkgName} | ${v.InstalledVersion} | ${v.FixedVersion || '—'} | ${cve} | ${title} |`;
+                  });
+                  sections.push(
+                      `### ${result.Target}\n` +
+                      `| Severity | Package | Installed | Fixed | CVE | Title |\n` +
+                      `|----------|---------|-----------|-------|-----|-------|\n` +
+                      rows.join('\n')
+                  );
+              }
+          }
+
+          const marker = '<!-- trivy-scan -->';
+          const maxBody = 65536;
+          const header = '## Trivy Security Scan\n\n';
+          const truncationNotice = '\n\n> ⚠️ Output truncated — download the full HTML report from the workflow artifacts.';
+          let body = marker + '\n' + header + (sections.length ? sections.join('\n\n') : '_No fixable vulnerabilities found._');
+
+          if (body.length > maxBody) {
+            body = body.slice(0, maxBody - truncationNotice.length) + truncationNotice;
+          }
+
+          const existing = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          }).then(r => r.data.find(c => c.body.includes(marker)));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+          }
+
+      if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
