@@ -115,57 +115,69 @@ runs:
           const fs = require('fs');
           const data = JSON.parse(fs.readFileSync('${{ steps.setup.outputs.report_dir }}/trivy.json', 'utf8'));
 
-          const severityIcon = { CRITICAL: '🔴', HIGH: '🟠' };
+          async function run() {
+            const severityIcon = { CRITICAL: '🔴', HIGH: '🟠' };
 
-          let sections = [];
-          for (const result of (data.Results || [])) {
+            let sections = [];
+            for (const result of (data.Results || [])) {
               const vulns = result.Vulnerabilities || [];
               if (vulns.length !== 0) {
-                  const rows = vulns.map(v => {
-                      const icon = severityIcon[v.Severity] || v.Severity;
-                      const cve = `[${v.VulnerabilityID}](https://avd.aquasec.com/nvd/${v.VulnerabilityID.toLowerCase()})`;
-                      const title = (v.Title || '').replace(/\|/g, '\\|');
-                      return `| ${icon} ${v.Severity} | ${v.PkgName} | ${v.InstalledVersion} | ${v.FixedVersion || '—'} | ${cve} | ${title} |`;
-                  });
-                  sections.push(
-                      `### ${result.Target}\n` +
-                      `| Severity | Package | Installed | Fixed | CVE | Title |\n` +
-                      `|----------|---------|-----------|-------|-----|-------|\n` +
-                      rows.join('\n')
-                  );
+                const rows = vulns.map(v => {
+                  const icon = severityIcon[v.Severity] || v.Severity;
+                  const cve = `[${v.VulnerabilityID}](https://avd.aquasec.com/nvd/${v.VulnerabilityID.toLowerCase()})`;
+                  const title = (v.Title || '').replace(/\|/g, '\\|');
+                  return `| ${icon} ${v.Severity} | ${v.PkgName} | ${v.InstalledVersion} | ${v.FixedVersion || '—'} | ${cve} | ${title} |`;
+                });
+                sections.push(
+                  `### ${result.Target}\n` +
+                  `| Severity | Package | Installed | Fixed | CVE | Title |\n` +
+                  `|----------|---------|-----------|-------|-----|-------|\n` +
+                  rows.join('\n')
+                );
               }
-          }
+            }
 
-          const marker = '<!-- trivy-scan -->';
-          const maxBody = 65536;
-          const header = '## Trivy Security Scan\n\n';
-          const truncationNotice = '\n\n> ⚠️ Output truncated — download the full HTML report from the workflow artifacts.';
-          let body = marker + '\n' + header + (sections.length ? sections.join('\n\n') : '_No fixable vulnerabilities found._');
+            const marker = '<!-- trivy-scan -->';
+            const maxBody = 65536;
+            const header = '## Trivy Security Scan\n\n';
+            const truncationNotice = '\n\n> ⚠️ Output truncated — download the full HTML report from the workflow artifacts.';
+            let body = marker + '\n' + header + (sections.length ? sections.join('\n\n') : '_No fixable vulnerabilities found._');
 
-          if (body.length > maxBody) {
-            body = body.slice(0, maxBody - truncationNotice.length) + truncationNotice;
-          }
+            if (body.length > maxBody) {
+              body = body.slice(0, maxBody - truncationNotice.length) + truncationNotice;
+            }
 
-          const existing = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-          }).then(r => r.data.find(c => c.body.includes(marker)));
-
-          if (existing) {
-            await github.rest.issues.updateComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: existing.id,
-              body,
-            });
-          } else {
-            await github.rest.issues.createComment({
+            const existing = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body,
-            });
+            }).then(r => r.data.find(c => c.body.includes(marker)));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+          }
+
+          try {
+            await run();
+          } catch (err) {
+            if (err.status === 403) {
+              core.warning(`Skipping PR comment: ${err.message}`);
+            } else {
+              throw err;
+            }
           }
 
       if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
