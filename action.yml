@@ -91,7 +91,7 @@ runs:
       if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
 
     - name: Upload Trivy report
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: 'Trivy Scan Results'
         path: "${{ steps.setup.outputs.report_dir }}/trivy.html"
@@ -99,7 +99,7 @@ runs:
       if: inputs.upload_report == 'true'
 
     - name: Upload SARIF report
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
       continue-on-error: true
       with:
         sarif_file: "${{ steps.setup.outputs.report_dir }}/trivy.sarif"
@@ -108,7 +108,7 @@ runs:
       if: inputs.upload_sarif == 'true'
 
     - name: Comment on PR
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       with:
         github-token: ${{ inputs.github-token }}
         script: |
