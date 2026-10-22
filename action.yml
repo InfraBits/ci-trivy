@@ -30,9 +30,20 @@ runs:
       shell: bash
       run: |
         work_dir="${{ runner.temp }}/trivy-$(uuidgen)"
-        mkdir -p "${work_dir}/cache/" "${work_dir}/reports/"
+        mkdir -p "${work_dir}/cache/" "${work_dir}/reports/" "${work_dir}/docker/"
         echo "cache_dir=${work_dir}/cache/" >> $GITHUB_OUTPUT
         echo "report_dir=${work_dir}/reports/" >> $GITHUB_OUTPUT
+
+        # Pass through any registry credentials (e.g. from docker/login-action),
+        # images published directly to a registry are not available via the docker socket
+        docker_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+        if [ -f "${docker_config}" ];
+        then
+          cp "${docker_config}" "${work_dir}/docker/config.json"
+        else
+          echo '{}' > "${work_dir}/docker/config.json"
+        fi
+        echo "docker_config_dir=${work_dir}/docker/" >> $GITHUB_OUTPUT
 
     - name: Execute Trivy scan
       shell: bash
@@ -41,6 +52,7 @@ runs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
             ghcr.io/aquasecurity/trivy \
             image \
             --scanners vuln \
@@ -59,6 +71,7 @@ runs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
             ghcr.io/aquasecurity/trivy \
             image \
             --scanners vuln \
@@ -78,6 +91,7 @@ runs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
+            -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
             ghcr.io/aquasecurity/trivy \
             image \
             --scanners vuln \
