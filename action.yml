@@ -1,11 +1,15 @@
 name: Trivy scanner
-description: Scan a container image using `trivy`
+description: Scan a container image or SBOM using `trivy`
 
 inputs:
   image:
+    description: Container image to scan (mutually exclusive with `sbom`)
     required: false
     type: string
-    default: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  sbom:
+    description: Path to an SBOM file, or a directory of SBOM files, to scan (mutually exclusive with `image`)
+    required: false
+    type: string
   upload_report:
     required: false
     type: string
@@ -28,9 +32,23 @@ runs:
   steps:
     - id: setup
       shell: bash
+      env:
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_SBOM: ${{ inputs.sbom }}
       run: |
+        if [ -n "${INPUT_IMAGE}" ] && [ -n "${INPUT_SBOM}" ];
+        then
+          echo "::error::Only one of 'image' or 'sbom' may be specified"
+          exit 1
+        fi
+        if [ -z "${INPUT_IMAGE}" ] && [ -z "${INPUT_SBOM}" ];
+        then
+          echo "::error::One of 'image' or 'sbom' must be specified"
+          exit 1
+        fi
+
         work_dir="${{ runner.temp }}/trivy-$(uuidgen)"
-        mkdir -p "${work_dir}/cache/" "${work_dir}/reports/" "${work_dir}/docker/"
+        mkdir -p "${work_dir}/cache/" "${work_dir}/reports/" "${work_dir}/docker/" "${work_dir}/sbom/"
         echo "cache_dir=${work_dir}/cache/" >> $GITHUB_OUTPUT
         echo "report_dir=${work_dir}/reports/" >> $GITHUB_OUTPUT
 
@@ -45,16 +63,43 @@ runs:
         fi
         echo "docker_config_dir=${work_dir}/docker/" >> $GITHUB_OUTPUT
 
+        # Copy the SBOM(s) into a known location so they can be mounted into the trivy container
+        if [ -n "${INPUT_SBOM}" ] && [ -f "${INPUT_SBOM}" ];
+        then
+          cp "${INPUT_SBOM}" "${work_dir}/sbom/"
+          echo "scan_type=sbom" >> $GITHUB_OUTPUT
+          echo "scan_target=/sbom/$(basename "${INPUT_SBOM}")" >> $GITHUB_OUTPUT
+        elif [ -n "${INPUT_SBOM}" ] && [ -d "${INPUT_SBOM}" ];
+        then
+          # `trivy sbom` only takes a single file, `rootfs` discovers SBOMs
+          # (*.spdx, *.spdx.json, *.cdx, *.cdx.json) within a directory
+          cp -R "${INPUT_SBOM}/." "${work_dir}/sbom/"
+          echo "scan_type=rootfs" >> $GITHUB_OUTPUT
+          echo "scan_target=/sbom" >> $GITHUB_OUTPUT
+        elif [ -n "${INPUT_SBOM}" ];
+        then
+          echo "::error::SBOM path '${INPUT_SBOM}' is not a file or directory"
+          exit 1
+        else
+          echo "scan_type=image" >> $GITHUB_OUTPUT
+          echo "scan_target=${INPUT_IMAGE}" >> $GITHUB_OUTPUT
+        fi
+        echo "sbom_dir=${work_dir}/sbom/" >> $GITHUB_OUTPUT
+
     - name: Execute Trivy scan
       shell: bash
+      env:
+        SCAN_TYPE: ${{ steps.setup.outputs.scan_type }}
+        SCAN_TARGET: ${{ steps.setup.outputs.scan_target }}
       run: |
         docker run -i \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
             -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
+            -v "${{ steps.setup.outputs.sbom_dir }}:/sbom:ro" \
             ghcr.io/aquasecurity/trivy \
-            image \
+            "${SCAN_TYPE}" \
             --scanners vuln \
             --severity "CRITICAL,HIGH" \
             --exit-code 0 \
@@ -62,45 +107,53 @@ runs:
             --format template \
             --template @contrib/html.tpl \
             --output /out/trivy.html \
-            "${{ inputs.image }}"
+            "${SCAN_TARGET}"
 
     - name: Generate sarif report
       shell: bash
+      env:
+        SCAN_TYPE: ${{ steps.setup.outputs.scan_type }}
+        SCAN_TARGET: ${{ steps.setup.outputs.scan_target }}
       run: |
         docker run -i \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
             -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
+            -v "${{ steps.setup.outputs.sbom_dir }}:/sbom:ro" \
             ghcr.io/aquasecurity/trivy \
-            image \
+            "${SCAN_TYPE}" \
             --scanners vuln \
             --severity "CRITICAL,HIGH" \
             --exit-code 0 \
             --ignore-unfixed \
             --format sarif \
             --output /out/trivy.sarif \
-            "${{ inputs.image }}"
+            "${SCAN_TARGET}"
 
       if: inputs.upload_sarif == 'true'
 
     - name: Generate json report
       shell: bash
+      env:
+        SCAN_TYPE: ${{ steps.setup.outputs.scan_type }}
+        SCAN_TARGET: ${{ steps.setup.outputs.scan_target }}
       run: |
         docker run -i \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ steps.setup.outputs.report_dir }}:/out" \
             -v "${{ steps.setup.outputs.cache_dir }}:/root/.cache/trivy" \
             -v "${{ steps.setup.outputs.docker_config_dir }}:/root/.docker:ro" \
+            -v "${{ steps.setup.outputs.sbom_dir }}:/sbom:ro" \
             ghcr.io/aquasecurity/trivy \
-            image \
+            "${SCAN_TYPE}" \
             --scanners vuln \
             --severity "CRITICAL,HIGH" \
             --exit-code 0 \
             --ignore-unfixed \
             --format json \
             --output /out/trivy.json \
-            "${{ inputs.image }}"
+            "${SCAN_TARGET}"
 
       if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
 
